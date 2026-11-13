@@ -1,5 +1,6 @@
 """Config precedence: dataclass defaults -> config file -> CLI flags."""
 
+import os
 import sys
 
 import pytest
@@ -16,11 +17,18 @@ from netpulse.config import (
 
 def test_defaults_are_netpulse_not_netmon():
     c = Config()
-    assert c.db_path == "/var/lib/netpulse/netpulse.db"
-    assert c.pid_file == "/var/run/netpulse.pid"
-    assert c.log_file == "/var/log/netpulse.log"
-    assert c.export_dir == "/var/lib/netpulse/exports"
+    assert "netmon" not in c.db_path.lower()
+    assert "netpulse" in c.db_path.lower()
+    assert c.db_path.endswith("netpulse.db")
+    assert c.pid_file.endswith("netpulse.pid")
+    assert c.log_file.endswith("netpulse.log")
+    assert c.export_dir.endswith("exports")
     assert c.iptables_chain == "NETPULSE_INPUT"
+    if os.name != "nt":
+        assert c.db_path == "/var/lib/netpulse/netpulse.db"
+        assert c.pid_file == "/var/run/netpulse.pid"
+        assert c.log_file == "/var/log/netpulse.log"
+        assert c.export_dir == "/var/lib/netpulse/exports"
 
 
 def test_load_config_file_missing_returns_empty(tmp_path):
@@ -115,3 +123,29 @@ def test_resolve_config_precedence_defaults_file_cli(tmp_path):
     # Unset (None) CLI flags fall through to the file value
     c = resolve_config(str(conf), {"discovery_interval": None})
     assert c.discovery_interval == 30
+
+
+def test_exclusions_match_mac_ip_and_cidr():
+    c = Config(
+        exclude_macs=["AA-BB-CC-DD-EE-FF"],
+        exclude_ips=["192.168.2.50", "10.0.0.0/24"],
+    )
+    assert c.is_excluded("aa:bb:cc:dd:ee:ff", "192.168.2.1")
+    assert c.is_excluded(ip="192.168.2.50")
+    assert c.is_excluded(ip="10.0.0.9")
+    assert not c.is_excluded("11:22:33:44:55:66", "192.168.2.9")
+
+
+def test_validate_rejects_bad_modes():
+    with pytest.raises(ValueError, match="discovery_mode"):
+        Config(discovery_mode="sneaky").validate()
+    with pytest.raises(ValueError, match="presence_mode"):
+        Config(presence_mode="vibes").validate()
+    with pytest.raises(ValueError, match="ping_workers"):
+        Config(ping_workers=0).validate()
+
+
+def test_fallback_parser_keeps_hash_inside_quoted_string():
+    assert _parse_simple_toml('iptables_chain = "A#B"  # comment\n') == {
+        "iptables_chain": "A#B"
+    }

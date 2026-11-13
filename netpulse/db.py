@@ -59,14 +59,29 @@ class Database:
     CREATE INDEX IF NOT EXISTS idx_state_mac ON state_history(mac, timestamp);
     """
 
-    def __init__(self, db_path: str, retention_days: int = 90):
+    def __init__(self, db_path: str, retention_days: int = 90, read_only: bool = False):
         self.db_path = db_path
         self.retention_days = retention_days
-        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        self.read_only = read_only
+        self._closed = False
+        if read_only:
+            if not Path(db_path).is_file():
+                raise FileNotFoundError(f"netpulse database not found: {db_path}")
+            uri = f"file:{Path(db_path).resolve().as_posix()}?mode=ro"
+            self.conn = sqlite3.connect(uri, uri=True, check_same_thread=False, timeout=5.0)
+        else:
+            Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+            self.conn = sqlite3.connect(db_path, check_same_thread=False, timeout=5.0)
+            self.conn.execute("PRAGMA journal_mode=WAL")
+            # WAL + NORMAL is durable against process crashes and avoids an
+            # fsync per commit -- which on Windows turns a 120-device
+            # discovery pass into half a minute of disk waits.
+            self.conn.execute("PRAGMA synchronous=NORMAL")
+            self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.row_factory = sqlite3.Row
         self.lock = threading.Lock()
-        self._init_db()
+        if not read_only:
+            self._init_db()
 
     def _init_db(self):
         with self.lock:
@@ -82,39 +97,62 @@ class Database:
             cur = self.conn.cursor()
             try:
                 yield cur
-            finally:
                 self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+                raise
+            finally:
                 cur.close()
 
     def upsert_device(self, mac: str, ip: str, hostname: str = "",
                       vendor: str = "Unknown", state: str = "online"):
-        now = time.time()
         with self.cursor() as cur:
-            cur.execute("SELECT state, state_changed, first_seen FROM devices WHERE mac = ?", (mac,))
-            row = cur.fetchone()
-            old_state = row["state"] if row else None
-            state_changed = row["state_changed"] if row else now
+            self._upsert_device_row(cur, mac, ip, hostname, vendor, state)
 
-            if old_state != state:
-                state_changed = now
-                if old_state:
-                    cur.execute(
-                        "INSERT INTO state_history (timestamp, mac, old_state, new_state) VALUES (?, ?, ?, ?)",
-                        (now, mac, old_state, state)
-                    )
+    def upsert_devices(self, devices: List[Dict]):
+        """Upsert many devices in a single transaction.
 
-            cur.execute("""
-                INSERT INTO devices (mac, ip, hostname, vendor, first_seen, last_seen, state, state_changed)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(mac) DO UPDATE SET
-                    ip = excluded.ip,
-                    hostname = CASE WHEN excluded.hostname != '' THEN excluded.hostname ELSE hostname END,
-                    vendor = CASE WHEN excluded.vendor != 'Unknown' THEN excluded.vendor ELSE vendor END,
-                    last_seen = excluded.last_seen,
-                    state = excluded.state,
-                    state_changed = excluded.state_changed
-            """, (mac, ip, hostname, vendor, now if not row else row["first_seen"],
-                  now, state, state_changed))
+        Discovery can see a whole /24 at once; committing per device is both
+        slow (one fsync each) and needless -- one transaction is enough.
+        """
+        with self.cursor() as cur:
+            for device in devices:
+                self._upsert_device_row(
+                    cur,
+                    device["mac"],
+                    device.get("ip", ""),
+                    device.get("hostname", ""),
+                    device.get("vendor", "Unknown"),
+                    device.get("state", "unknown"),
+                )
+
+    def _upsert_device_row(self, cur, mac, ip, hostname, vendor, state):
+        now = time.time()
+        cur.execute("SELECT state, state_changed, first_seen FROM devices WHERE mac = ?", (mac,))
+        row = cur.fetchone()
+        old_state = row["state"] if row else None
+        state_changed = row["state_changed"] if row else now
+
+        if old_state != state:
+            state_changed = now
+            if old_state:
+                cur.execute(
+                    "INSERT INTO state_history (timestamp, mac, old_state, new_state) VALUES (?, ?, ?, ?)",
+                    (now, mac, old_state, state)
+                )
+
+        cur.execute("""
+            INSERT INTO devices (mac, ip, hostname, vendor, first_seen, last_seen, state, state_changed)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(mac) DO UPDATE SET
+                ip = excluded.ip,
+                hostname = CASE WHEN excluded.hostname != '' THEN excluded.hostname ELSE hostname END,
+                vendor = CASE WHEN excluded.vendor != 'Unknown' THEN excluded.vendor ELSE vendor END,
+                last_seen = excluded.last_seen,
+                state = excluded.state,
+                state_changed = excluded.state_changed
+        """, (mac, ip, hostname, vendor, now if not row else row["first_seen"],
+              now, state, state_changed))
 
     def record_bandwidth(self, mac: str, ip: str, rx_bytes: float, tx_bytes: float,
                          rx_rate: float, tx_rate: float):
@@ -167,4 +205,7 @@ class Database:
             """, (cutoff,))
 
     def close(self):
+        if self._closed:
+            return
+        self._closed = True
         self.conn.close()

@@ -72,11 +72,12 @@ def test_check_all_updates_state_and_resets_backoff_when_online(mock_run, tmp_pa
 
 
 @patch("netpulse.presence.subprocess.run")
-def test_check_all_doubles_backoff_while_offline_and_caps_it(mock_run, tmp_path):
+def test_check_all_starts_backoff_at_offline_interval_then_doubles_and_caps(
+        mock_run, tmp_path):
     mock_run.return_value = _completed(1)  # always offline
     monitor, db = make_monitor(
         tmp_path, online_check_interval=10, offline_check_interval=120,
-        max_offline_backoff=50,
+        max_offline_backoff=500,
     )
     mac = "aa:bb:cc:dd:ee:ff"
     monitor.update_devices([{"mac": mac, "ip": "192.168.1.10"}])
@@ -87,10 +88,49 @@ def test_check_all_doubles_backoff_while_offline_and_caps_it(mock_run, tmp_path)
         monitor.check_all()
         seen_backoffs.append(monitor.backoff[mac])
 
-    # Starts doubling from online_check_interval (10): 20, 40, then capped at 50.
-    assert seen_backoffs[:3] == [20, 40, 50]
-    assert all(b == 50 for b in seen_backoffs[3:])  # never exceeds the cap
+    # First miss seeds offline_check_interval (not the online cadence), then
+    # doubles: 120, 240, 480, capped at 500.
+    assert seen_backoffs == [120, 240, 480, 500, 500, 500]
     assert monitor.devices[mac]["state"] == "offline"
+    db.close()
+
+
+@patch("netpulse.presence.subprocess.run")
+def test_excluded_devices_are_never_pinged(mock_run, tmp_path):
+    mock_run.return_value = _completed(0)
+    monitor, db = make_monitor(tmp_path, exclude_macs=["aa:bb:cc:dd:ee:ff"])
+    mac = "aa:bb:cc:dd:ee:ff"
+    monitor.update_devices([{"mac": mac, "ip": "192.168.1.10"}])
+
+    monitor.last_checks[mac] = 0
+    monitor.check_all()
+
+    assert mac not in monitor.devices
+    mock_run.assert_not_called()
+    db.close()
+
+
+@patch("netpulse.presence.subprocess.run")
+def test_arp_mode_derives_presence_from_sweeps_without_pinging(mock_run, tmp_path):
+    monitor, db = make_monitor(
+        tmp_path, presence_mode="arp", arp_offline_misses=2,
+    )
+    mac = "aa:bb:cc:dd:ee:ff"
+    monitor.update_devices([{"mac": mac, "ip": "192.168.1.10"}])
+
+    monitor.last_checks[mac] = 0
+    monitor.check_all()  # arp mode: always a no-op
+    mock_run.assert_not_called()
+
+    monitor.apply_discovery_presence([mac])
+    assert monitor.devices[mac]["state"] == "online"
+
+    monitor.apply_discovery_presence([])   # first miss: still online
+    assert monitor.devices[mac]["state"] == "online"
+
+    monitor.apply_discovery_presence([])   # second miss: offline
+    assert monitor.devices[mac]["state"] == "offline"
+    assert db.get_devices()[0]["state"] == "offline"
     db.close()
 
 

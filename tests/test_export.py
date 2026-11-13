@@ -4,7 +4,7 @@ import csv
 import json
 
 from netpulse.db import Database
-from netpulse.export import Exporter
+from netpulse.export import DEVICE_FIELDS, Exporter
 
 
 def make_exporter(tmp_path, with_device=True):
@@ -66,13 +66,15 @@ def test_export_csv_default_filename(tmp_path):
     db.close()
 
 
-def test_export_csv_with_no_devices_does_not_write_a_file(tmp_path):
-    # Documents existing behavior: export_csv() returns the would-be path
-    # without creating it when there are no devices, since csv.DictWriter
-    # needs the first row's keys as fieldnames and there isn't one.
+def test_export_csv_with_no_devices_writes_a_header_only_file(tmp_path):
     exporter, db = make_exporter(tmp_path, with_device=False)
     path = exporter.export_csv()
-    assert not path.exists()
+
+    assert path.exists()
+    with open(path, newline="") as f:
+        reader = csv.DictReader(f)
+        assert reader.fieldnames == DEVICE_FIELDS
+        assert list(reader) == []
     db.close()
 
 

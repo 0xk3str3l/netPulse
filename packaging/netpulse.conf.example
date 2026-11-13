@@ -1,9 +1,10 @@
 # Netpulse configuration file
 #
-# Copy to /etc/netpulse/netpulse.conf (the built-in default path), or point
-# --config at another location. Precedence: CLI flags > this file > the
-# built-in defaults below -- omit any key here to fall through to the next
-# level. Every key from netpulse.config.Config is listed with its default.
+# Copy to /etc/netpulse/netpulse.conf on Linux (the built-in default path), or
+# to %LOCALAPPDATA%\netpulse\netpulse.conf on Windows, or point --config at
+# another location. Precedence: CLI flags > this file > the built-in defaults
+# below -- omit any key here to fall through to the next level. Every key from
+# netpulse.config.Config is listed with its default.
 #
 # Flat TOML: no [section] tables. Parsed with the stdlib `tomllib` on
 # Python 3.11+, or a small built-in subset parser on 3.9/3.10 -- no
@@ -11,28 +12,50 @@
 
 # ─── Network ─────────────────────────────────────────────────────────────
 interface = "auto"              # auto = first non-loopback interface
+                                # Windows: friendly name, e.g. "Ethernet 2"
 target_subnet = "auto"          # auto = derived from interface CIDR
-exclude_macs = []                # e.g. ["aa:bb:cc:dd:ee:ff"]
-exclude_ips = []                  # e.g. ["192.168.1.5"]
+exclude_macs = []               # e.g. ["aa:bb:cc:dd:ee:ff"]
+exclude_ips = []                # e.g. ["192.168.1.5", "192.168.1.0/28"]
 
 # ─── Discovery ────────────────────────────────────────────────────────────
-discovery_interval = 60         # seconds between full ARP sweeps
+discovery_interval = 60         # seconds between discovery cycles
 discovery_timeout = 3.0         # ARP timeout per sweep (seconds)
+discovery_mode = "auto"         # auto    = L2 ARP if available, else OS ARP
+                                #           cache + a sweep every
+                                #           active_sweep_interval
+                                # passive = read the OS ARP cache only
+                                #           (zero discovery packets)
+                                # active  = always run a rate-limited sweep
+sweep_rate = 32                 # max ICMP probes per second while sweeping
+active_sweep_interval = 900     # min seconds between sweeps in auto mode
 
 # ─── Online / Offline presence ───────────────────────────────────────────
 online_check_interval = 10      # seconds between checks for ONLINE devices
-offline_check_interval = 120    # seconds between checks for OFFLINE devices (backoff base)
+offline_check_interval = 120    # first interval for OFFLINE devices; doubles
+                                # each further miss up to max_offline_backoff
 ping_timeout = 1.0              # ICMP timeout per device (seconds)
 ping_count = 1                  # ICMP echo requests per check
 max_offline_backoff = 600       # cap backoff at 10 min
+presence_mode = "icmp"          # icmp = adaptive parallel pings
+                                # arp  = derive presence from discovery
+                                #        sweeps only (zero extra traffic)
+                                # auto = icmp
+ping_workers = 32               # parallel ICMP checks
+arp_offline_misses = 2          # missed sweeps before arp mode marks offline
+
+# Reverse DNS is opt-in and off by default so the only traffic netpulse
+# generates stays ARP/ICMP on the local segment.
+resolve_hostnames = false
 
 # ─── Bandwidth ────────────────────────────────────────────────────────────
 bandwidth_interval = 5          # seconds between bandwidth samples
-use_iptables = true             # per-device accounting via iptables (requires root)
+use_iptables = true             # per-device accounting via iptables
+                                # (Linux + root only; ignored elsewhere)
 iptables_chain = "NETPULSE_INPUT"
 
 # ─── Database ─────────────────────────────────────────────────────────────
 db_path = "/var/lib/netpulse/netpulse.db"
+                                # Windows: %LOCALAPPDATA%\netpulse\netpulse.db
 db_retention_days = 90
 
 # ─── Reporting ────────────────────────────────────────────────────────────
@@ -42,6 +65,8 @@ csv_export_interval = 3600      # 1 hr
 
 # ─── Daemon ───────────────────────────────────────────────────────────────
 pid_file = "/var/run/netpulse.pid"
+                                # Windows: %LOCALAPPDATA%\netpulse\netpulse.pid
 log_file = "/var/log/netpulse.log"
+                                # Windows: %LOCALAPPDATA%\netpulse\netpulse.log
 log_level = "INFO"              # DEBUG | INFO | WARNING | ERROR
-daemonize = false
+daemonize = false               # POSIX only; Windows always runs foreground
