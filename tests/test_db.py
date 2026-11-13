@@ -1,5 +1,6 @@
 """SQLite persistence: upsert, retention/purge, bandwidth history."""
 
+import sqlite3
 import time
 
 import pytest
@@ -25,6 +26,18 @@ def test_upsert_device_inserts_new_device(db):
     assert devices[0]["vendor"] == "Apple"
     assert devices[0]["state"] == "online"
     assert devices[0]["first_seen"] == devices[0]["last_seen"]
+
+
+def test_upsert_devices_inserts_a_batch(db):
+    db.upsert_devices([
+        {"mac": "aa:bb:cc:dd:ee:01", "ip": "192.168.1.10", "state": "online"},
+        {"mac": "aa:bb:cc:dd:ee:02", "ip": "192.168.1.11", "state": "unknown"},
+    ])
+    devices = db.get_devices()
+    assert {d["mac"] for d in devices} == {
+        "aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02",
+    }
+    assert {d["state"] for d in devices} == {"online", "unknown"}
 
 
 def test_upsert_device_updates_existing_and_keeps_first_seen(db):
@@ -115,3 +128,25 @@ def test_purge_old_keeps_recent_offline_device(db):
     db.upsert_device(mac="aa:bb:cc:dd:ee:ff", ip="192.168.1.10", state="offline")
     db.purge_old()
     assert len(db.get_devices()) == 1
+
+
+def test_read_only_database_reads_without_writing(tmp_path):
+    path = tmp_path / "netpulse.db"
+    writer = Database(str(path))
+    writer.upsert_device(mac="aa:bb:cc:dd:ee:ff", ip="192.168.1.10", state="online")
+    writer.close()
+
+    ro = Database(str(path), read_only=True)
+    assert [d["mac"] for d in ro.get_devices()] == ["aa:bb:cc:dd:ee:ff"]
+    with pytest.raises(sqlite3.OperationalError):
+        with ro.cursor() as cur:
+            cur.execute(
+                "INSERT INTO devices (mac, ip, first_seen, last_seen, state, state_changed) "
+                "VALUES ('bb:bb:bb:bb:bb:bb', '192.168.1.11', 0, 0, 'online', 0)"
+            )
+    ro.close()
+
+
+def test_read_only_database_missing_file_raises(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        Database(str(tmp_path / "missing.db"), read_only=True)

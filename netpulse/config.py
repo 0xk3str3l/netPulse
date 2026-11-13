@@ -6,12 +6,38 @@ Config files are TOML, flat (no tables) by design, loaded with the stdlib
 no third-party TOML dependency, per the ground rule of no new dependencies.
 """
 
+import os
 import sys
 from dataclasses import dataclass, field, fields
+from ipaddress import ip_address, ip_network
 from pathlib import Path
 from typing import Any, Dict, List
 
-DEFAULT_CONFIG_PATH = "/etc/netpulse/netpulse.conf"
+
+def _default_data_dir() -> str:
+    """Writable per-platform state directory (Linux keeps its FHS default)."""
+    if os.name == "nt":
+        base = (
+            os.environ.get("LOCALAPPDATA")
+            or os.environ.get("PROGRAMDATA")
+            or os.environ.get("TEMP")
+            or str(Path.home())
+        )
+        return str(Path(base) / "netpulse")
+    return "/var/lib/netpulse"
+
+
+_DATA_DIR = _default_data_dir()
+
+DEFAULT_CONFIG_PATH = (
+    str(Path(_DATA_DIR) / "netpulse.conf")
+    if os.name == "nt"
+    else "/etc/netpulse/netpulse.conf"
+)
+
+
+def _normalise_mac(mac: str) -> str:
+    return mac.strip().lower().replace("-", ":")
 
 
 @dataclass
@@ -20,18 +46,34 @@ class Config:
     interface: str = "auto"            # auto = first non-loopback interface
     target_subnet: str = "auto"        # auto = derived from interface CIDR
     exclude_macs: List[str] = field(default_factory=list)
-    exclude_ips: List[str] = field(default_factory=list)
+    exclude_ips: List[str] = field(default_factory=list)  # IPs or CIDRs
 
     # Discovery
     discovery_interval: int = 60       # seconds between full ARP sweeps
     discovery_timeout: float = 3.0     # ARP timeout per sweep
+    # auto: L2 ARP if available, else the OS ARP/neighbour cache plus a
+    #       rate-limited ICMP sweep every active_sweep_interval.
+    # passive: read the OS ARP cache only -- sends zero discovery packets.
+    # active: always run a sweep.
+    discovery_mode: str = "auto"
+    sweep_rate: int = 32               # max ICMP probes per second while sweeping
+    active_sweep_interval: int = 900   # min seconds between sweeps in auto mode
 
     # Online/Offline
     online_check_interval: int = 10    # seconds between checks for ONLINE devices
-    offline_check_interval: int = 120  # seconds between checks for OFFLINE devices (backoff)
+    offline_check_interval: int = 120  # first interval for OFFLINE devices (backoff base)
     ping_timeout: float = 1.0          # ICMP timeout per device
     ping_count: int = 1               # ICMP echo requests per check
     max_offline_backoff: int = 600     # cap backoff at 10 min
+    # icmp: adaptive ping checks. arp: presence derived from discovery sweeps
+    # only (zero extra traffic -- maximum stealth). auto = icmp.
+    presence_mode: str = "icmp"
+    ping_workers: int = 32             # parallel ICMP checks
+    arp_offline_misses: int = 2        # missed sweeps before arp mode marks offline
+
+    # Privacy: reverse-DNS lookups are opt-in and off by default so the only
+    # traffic netpulse generates stays ARP/ICMP on the local segment.
+    resolve_hostnames: bool = False
 
     # Bandwidth
     bandwidth_interval: int = 5        # seconds between bandwidth samples
@@ -39,19 +81,67 @@ class Config:
     iptables_chain: str = "NETPULSE_INPUT"
 
     # Database
-    db_path: str = "/var/lib/netpulse/netpulse.db"
+    db_path: str = str(Path(_DATA_DIR) / "netpulse.db")
     db_retention_days: int = 90
 
     # Reporting
-    export_dir: str = "/var/lib/netpulse/exports"
+    export_dir: str = str(Path(_DATA_DIR) / "exports")
     json_export_interval: int = 300    # 5 min
     csv_export_interval: int = 3600    # 1 hr
 
     # Daemon
-    pid_file: str = "/var/run/netpulse.pid"
-    log_file: str = "/var/log/netpulse.log"
+    pid_file: str = (
+        str(Path(_DATA_DIR) / "netpulse.pid")
+        if os.name == "nt"
+        else "/var/run/netpulse.pid"
+    )
+    log_file: str = (
+        str(Path(_DATA_DIR) / "netpulse.log")
+        if os.name == "nt"
+        else "/var/log/netpulse.log"
+    )
     log_level: str = "INFO"
     daemonize: bool = False
+
+    def is_excluded(self, mac: str = "", ip: str = "") -> bool:
+        """True if this device matches exclude_macs or exclude_ips (CIDRs ok)."""
+        if mac:
+            wanted = _normalise_mac(mac)
+            if any(_normalise_mac(entry) == wanted for entry in self.exclude_macs):
+                return True
+        if ip:
+            try:
+                addr = ip_address(ip)
+            except ValueError:
+                return False
+            for entry in self.exclude_ips:
+                try:
+                    if "/" in entry:
+                        if addr in ip_network(entry, strict=False):
+                            return True
+                    elif ip_address(entry) == addr:
+                        return True
+                except ValueError:
+                    continue
+        return False
+
+    def validate(self) -> None:
+        """Reject values that would only fail later, deep inside a loop."""
+        if self.discovery_mode not in ("auto", "passive", "active"):
+            raise ValueError(
+                f"discovery_mode must be auto, passive, or active (got {self.discovery_mode!r})"
+            )
+        if self.presence_mode not in ("auto", "icmp", "arp"):
+            raise ValueError(
+                f"presence_mode must be auto, icmp, or arp (got {self.presence_mode!r})"
+            )
+        for name in ("discovery_interval", "bandwidth_interval", "sweep_rate",
+                     "ping_workers", "arp_offline_misses", "online_check_interval",
+                     "offline_check_interval"):
+            if getattr(self, name) <= 0:
+                raise ValueError(f"{name} must be greater than zero")
+        if self.active_sweep_interval < 0:
+            raise ValueError("active_sweep_interval must be >= 0")
 
 
 _VALID_KEYS = {f.name for f in fields(Config)}
@@ -80,6 +170,23 @@ def _parse_toml_value(raw: str, lineno: int) -> Any:
     raise ValueError(f"netpulse.conf line {lineno}: cannot parse value {raw!r}")
 
 
+def _strip_toml_comment(line: str) -> str:
+    """Remove a trailing # comment without touching # inside a quoted string."""
+    in_string = False
+    escaped = False
+    for i, char in enumerate(line):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and in_string:
+            escaped = True
+        elif char == '"':
+            in_string = not in_string
+        elif char == "#" and not in_string:
+            return line[:i]
+    return line
+
+
 def _parse_simple_toml(text: str) -> Dict[str, Any]:
     """Minimal TOML-subset parser for flat `key = value` files (Python < 3.11).
 
@@ -89,7 +196,7 @@ def _parse_simple_toml(text: str) -> Dict[str, Any]:
     """
     result: Dict[str, Any] = {}
     for lineno, raw_line in enumerate(text.splitlines(), 1):
-        line = raw_line.split("#", 1)[0].strip()
+        line = _strip_toml_comment(raw_line).strip()
         if not line:
             continue
         if "=" not in line:
@@ -104,7 +211,7 @@ def load_config_file(path: str) -> Dict[str, Any]:
     file_path = Path(path)
     if not file_path.exists():
         return {}
-    text = file_path.read_text()
+    text = file_path.read_text(encoding="utf-8")
     if sys.version_info >= (3, 11):
         import tomllib
         return tomllib.loads(text)
@@ -133,4 +240,6 @@ def apply_cli_overrides(base: Config, overrides: Dict[str, Any]) -> Config:
 def resolve_config(config_path: str, cli_overrides: Dict[str, Any]) -> Config:
     """Build the effective Config: defaults -> config file -> CLI flags."""
     config = apply_config_file(Config(), load_config_file(config_path))
-    return apply_cli_overrides(config, cli_overrides)
+    config = apply_cli_overrides(config, cli_overrides)
+    config.validate()
+    return config

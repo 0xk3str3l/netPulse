@@ -56,6 +56,11 @@ class NetpulseDaemon:
         self.discoverer = ARPDiscoverer(
             self.iface, config.discovery_timeout,
             enabled=self.capabilities.raw_socket,
+            mode=config.discovery_mode,
+            sweep_rate=config.sweep_rate,
+            active_sweep_interval=config.active_sweep_interval,
+            exclude_macs=config.exclude_macs,
+            exclude_ips=config.exclude_ips,
         )
         self.state_monitor = StateMonitor(self.db, config)
         self.bandwidth_monitor = BandwidthMonitor(
@@ -70,9 +75,19 @@ class NetpulseDaemon:
         self.last_json_export = 0
         self.last_csv_export = 0
         self.last_purge = 0
+        self._closed = False
 
     def _resolve_hostnames(self, devices: List[Dict]):
-        """Resolve hostnames for new devices (non-blocking, threaded)."""
+        """Resolve hostnames for new devices, only when explicitly enabled.
+
+        Reverse DNS is off by default: it is the one thing that could send
+        traffic beyond the local segment, and a resolver timeout would also
+        stall the discovery cycle. Opt in with ``resolve_hostnames = true``.
+        """
+        if not self.config.resolve_hostnames:
+            for d in devices:
+                d.setdefault("hostname", "")
+            return
         for d in devices:
             mac = d["mac"]
             if mac in self.devices and self.devices[mac].get("hostname"):
@@ -84,29 +99,33 @@ class NetpulseDaemon:
                     log.debug(f"Resolved {d['ip']} -> {name}")
 
     def _discovery_cycle(self):
-        """Full ARP discovery sweep."""
-        log.info("Running discovery sweep...")
-        devices = self.discoverer.sweep(self.subnet)
+        """Discovery sweep: L2 ARP, OS ARP cache, or a rate-limited probe."""
+        log.info("Running discovery cycle...")
+        devices = [
+            d for d in self.discoverer.sweep(self.subnet)
+            if not self.config.is_excluded(d["mac"], d["ip"])
+        ]
         self._resolve_hostnames(devices)
 
-        # Merge: update existing entries, add new ones, keep offline entries
+        # Merge: update existing entries, add new ones, keep offline entries.
+        # New devices start as "unknown" until presence actually confirms them;
+        # discovery alone (e.g. a stale ARP entry) is not proof of reachability.
         discovered_macs = {d["mac"] for d in devices}
         for d in devices:
             mac = d["mac"]
-            d["state"] = self.devices.get(mac, {}).get("state", "online")
+            d["state"] = self.devices.get(mac, {}).get("state", "unknown")
             self.devices[mac] = d
 
-        # Mark unreachable devices that we already know about
-        for mac in list(self.devices.keys()):
-            if mac not in discovered_macs:
-                # Don't immediately mark offline, let ping decide
-                pass
-
-        # Feed to state monitor
+        # Feed every known device to the state monitor; in arp mode presence
+        # is then resolved from this sweep, in icmp mode check_all() handles it
+        # on its own schedule in run().
         self.state_monitor.update_devices(list(self.devices.values()))
+        if self.config.presence_mode == "arp":
+            self.state_monitor.apply_discovery_presence(list(discovered_macs))
+
         self.last_discovery = time.time()
-        log.info(f"Discovery complete: {len(devices)} live devices, "
-                 f"{len(self.devices)} known total")
+        log.info(f"Discovery complete ({self.config.discovery_mode}): "
+                 f"{len(devices)} live devices, {len(self.devices)} known total")
 
     def _bandwidth_cycle(self):
         """Sample interface and per-device bandwidth."""
@@ -133,16 +152,44 @@ class NetpulseDaemon:
             self.db.purge_old()
             self.last_purge = now
 
+    def install_signal_handlers(self):
+        """Turn SIGTERM/SIGINT into a clean loop exit (foreground or daemon)."""
+        if threading.current_thread() is not threading.main_thread():
+            return
+
+        def _stop(signum, _frame):
+            log.info(f"Signal {signum} received; shutting down")
+            self.running.clear()
+
+        for name in ("SIGTERM", "SIGINT"):
+            sig = getattr(signal, name, None)
+            if sig is None:
+                continue
+            try:
+                signal.signal(sig, _stop)
+            except (ValueError, OSError):
+                pass
+
+    def _safe_cycle(self, name, cycle):
+        """Run one cycle; a failure must never take the whole daemon down."""
+        try:
+            cycle()
+        except Exception as e:
+            log.exception(f"{name} cycle failed (continuing): {e}")
+
     def run(self):
         """Main loop. Runs discovery, state checks, and bandwidth sampling."""
+        self.install_signal_handlers()
         log.info("Netpulse daemon started")
+        log.info(f"Presence mode: {self.config.presence_mode}; "
+                 f"discovery mode: {self.config.discovery_mode}")
         log.info(f"Devices will be checked every {self.config.online_check_interval}s "
                  f"(online) / adaptive backoff (offline)")
         log.info(f"Bandwidth sampled every {self.config.bandwidth_interval}s")
-        log.info(f"Full ARP discovery every {self.config.discovery_interval}s")
+        log.info(f"Full discovery every {self.config.discovery_interval}s")
 
         # Initial discovery
-        self._discovery_cycle()
+        self._safe_cycle("discovery", self._discovery_cycle)
 
         last_bw_sample = time.time()
         last_state_check = time.time()
@@ -154,23 +201,23 @@ class NetpulseDaemon:
 
                 # Discovery cycle
                 if now - self.last_discovery >= self.config.discovery_interval:
-                    self._discovery_cycle()
+                    self._safe_cycle("discovery", self._discovery_cycle)
 
                 # State check cycle
                 if now - last_state_check >= 1:  # Check at most once per second
-                    self.state_monitor.check_all()
+                    self._safe_cycle("presence", self.state_monitor.check_all)
                     last_state_check = now
 
                 # Bandwidth cycle
                 if now - last_bw_sample >= self.config.bandwidth_interval:
-                    self._bandwidth_cycle()
+                    self._safe_cycle("bandwidth", self._bandwidth_cycle)
                     last_bw_sample = now
 
                 # Export cycle
-                self._export_cycle()
+                self._safe_cycle("export", self._export_cycle)
 
                 # Purge cycle
-                self._purge_cycle()
+                self._safe_cycle("purge", self._purge_cycle)
 
                 # Periodic status log (every 5 min)
                 if now - last_status >= 300:
@@ -195,7 +242,7 @@ class NetpulseDaemon:
             self.shutdown()
 
     def _format_bw(self, bps: float) -> str:
-        """Format bits per second to human-readable."""
+        """Format a byte-per-second rate to human-readable."""
         if bps < 1024:
             return f"{bps:.1f} B/s"
         elif bps < 1024 * 1024:
@@ -206,14 +253,15 @@ class NetpulseDaemon:
             return f"{bps / (1024 * 1024 * 1024):.2f} GB/s"
 
     def shutdown(self):
-        """Graceful shutdown."""
+        """Graceful shutdown (idempotent)."""
+        if self._closed:
+            return
+        self._closed = True
         log.info("Shutting down...")
         self.bandwidth_monitor.cleanup_iptables()
         self.db.close()
         self.running.clear()
         log.info("Netpulse stopped")
-
-
 
     def get_snapshot(self) -> Dict:
         """Get current state as dictionary (for live queries)."""
@@ -255,7 +303,26 @@ class NetpulseDaemon:
 # ─── Daemonization ──────────────────────────────────────────────────────────
 
 def daemonize(pidfile: str):
-    """Fork and detach into background daemon process."""
+    """Fork and detach into background daemon process (POSIX only)."""
+    if not hasattr(os, "fork"):
+        sys.stderr.write(
+            "--daemonize requires a POSIX system (fork). On Windows, run in "
+            "the foreground or wrap netpulse with a service manager.\n"
+        )
+        sys.exit(1)
+
+    if os.path.exists(pidfile):
+        try:
+            existing = int(open(pidfile, encoding="utf-8").read().strip() or 0)
+            if existing > 0:
+                os.kill(existing, 0)  # raises if the process is gone
+                sys.stderr.write(
+                    f"netpulse already running (pid {existing}, {pidfile})\n"
+                )
+                sys.exit(1)
+        except (OSError, ValueError):
+            pass  # stale pid file
+
     try:
         pid = os.fork()
         if pid > 0:
@@ -285,14 +352,19 @@ def daemonize(pidfile: str):
         os.dup2(f.fileno(), sys.stderr.fileno())
 
     # Write PID file
-    with open(pidfile, "w") as f:
+    os.makedirs(os.path.dirname(pidfile) or ".", exist_ok=True)
+    with open(pidfile, "w", encoding="utf-8") as f:
         f.write(str(os.getpid()))
 
-    # Handle PID cleanup on exit
-    def cleanup(signum=None, frame=None):
-        if os.path.exists(pidfile):
-            os.unlink(pidfile)
-        sys.exit(0)
+    # Remove the PID file on any clean interpreter exit; SIGTERM/SIGINT are
+    # handled by NetpulseDaemon.install_signal_handlers() (installing a
+    # separate signal handler here would silently replace it).
+    def cleanup():
+        try:
+            if os.path.exists(pidfile):
+                os.unlink(pidfile)
+        except OSError:
+            pass
 
-    signal.signal(signal.SIGTERM, cleanup)
-    signal.signal(signal.SIGINT, cleanup)
+    import atexit
+    atexit.register(cleanup)

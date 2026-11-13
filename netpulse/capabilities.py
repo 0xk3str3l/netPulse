@@ -18,17 +18,49 @@ log = logging.getLogger("netpulse")
 
 
 def has_root() -> bool:
+    """Root on POSIX; elevation (Administrator) on Windows."""
+    if os.name == "nt":
+        try:
+            import ctypes
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:
+            return False
     return hasattr(os, "geteuid") and os.geteuid() == 0
 
 
-def has_raw_socket() -> bool:
-    """Best-effort check for L2 raw socket capability (root or CAP_NET_RAW).
+def _npcap_available() -> bool:
+    """True when Npcap's wpcap.dll is installed (needed for L2 on Windows).
 
-    This is what the ARP sweep needs on Linux. Non-Linux platforms have no
-    AF_PACKET, so fall back to a plain root check there.
+    Checked on the filesystem rather than by importing scapy: importing scapy
+    without Npcap prints a libpcap warning, and a capability probe should be
+    silent.
+    """
+    import ctypes.util
+
+    try:
+        if ctypes.util.find_library("wpcap"):
+            return True
+    except Exception:
+        pass
+    windir = os.environ.get("SystemRoot", r"C:\Windows")
+    candidates = (
+        os.path.join(windir, "System32", "Npcap", "wpcap.dll"),
+        os.path.join(windir, "System32", "wpcap.dll"),
+    )
+    return any(os.path.exists(path) for path in candidates)
+
+
+def has_raw_socket() -> bool:
+    """Best-effort check for L2 raw socket capability.
+
+    Linux needs root or CAP_NET_RAW for AF_PACKET. Windows needs Npcap (scapy
+    cannot send L2 frames without it) *and* elevation. When this is False the
+    discoverer still works unprivileged via the OS ARP table.
     """
     af_packet = getattr(socket, "AF_PACKET", None)
     if af_packet is None:
+        if os.name == "nt":
+            return _npcap_available() and has_root()
         return has_root()
     try:
         raw = socket.socket(af_packet, socket.SOCK_RAW, socket.htons(0x0003))
@@ -64,15 +96,16 @@ def check_capabilities(use_iptables: bool) -> Capabilities:
 
     if not caps.root:
         log.warning(
-            "Not running as root: ARP discovery and iptables accounting "
-            "typically need root (or CAP_NET_RAW/CAP_NET_ADMIN)."
+            "Not running as root/Administrator: L2 ARP sweeps and iptables "
+            "accounting are unavailable; discovery falls back to the OS ARP "
+            "table and interface bandwidth still works."
         )
 
     if not caps.raw_socket:
         log.warning(
-            "No raw-socket capability: ARP-based device discovery is disabled "
-            "for this run. Presence checks and interface-level bandwidth for "
-            "already-known devices still run."
+            "No L2 raw-socket capability: falling back to the OS ARP table "
+            "(zero-packet reads) plus rate-limited ICMP sweeps for discovery. "
+            "Presence checks and interface-level bandwidth still run."
         )
 
     if use_iptables and not caps.iptables_binary:
