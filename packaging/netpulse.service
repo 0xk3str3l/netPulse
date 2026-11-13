@@ -1,0 +1,28 @@
+[Unit]
+Description=Netpulse Silent Network Monitoring Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=forking
+ExecStart=/usr/local/bin/netpulse --daemonize --pidfile /var/run/netpulse.pid --config /etc/netpulse/netpulse.conf
+ExecStop=/bin/kill -TERM $MAINPID
+PIDFile=/var/run/netpulse.pid
+Restart=on-failure
+RestartSec=30
+PrivateTmp=true
+NoNewPrivileges=true
+
+# CAP_NET_RAW: ARP/ICMP raw sockets (device discovery). CAP_NET_ADMIN: iptables
+# accounting chain. CAP_NET_BROADCAST: ARP broadcast sweeps. If the deployment
+# doesn't run this unit as root, granting exactly these three via systemd
+# instead is what netpulse.capabilities checks for at startup -- drop a
+# capability here and the matching subsystem disables itself gracefully
+# (see §4.4) rather than crashing the unit.
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN CAP_NET_BROADCAST
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN CAP_NET_BROADCAST
+
+ReadWritePaths=/var/lib/netpulse /var/log/netpulse.log
+
+[Install]
+WantedBy=multi-user.target

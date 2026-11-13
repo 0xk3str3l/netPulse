@@ -1,0 +1,47 @@
+# Netpulse configuration file
+#
+# Copy to /etc/netpulse/netpulse.conf (the built-in default path), or point
+# --config at another location. Precedence: CLI flags > this file > the
+# built-in defaults below -- omit any key here to fall through to the next
+# level. Every key from netpulse.config.Config is listed with its default.
+#
+# Flat TOML: no [section] tables. Parsed with the stdlib `tomllib` on
+# Python 3.11+, or a small built-in subset parser on 3.9/3.10 -- no
+# third-party TOML dependency either way.
+
+# ─── Network ─────────────────────────────────────────────────────────────
+interface = "auto"              # auto = first non-loopback interface
+target_subnet = "auto"          # auto = derived from interface CIDR
+exclude_macs = []                # e.g. ["aa:bb:cc:dd:ee:ff"]
+exclude_ips = []                  # e.g. ["192.168.1.5"]
+
+# ─── Discovery ────────────────────────────────────────────────────────────
+discovery_interval = 60         # seconds between full ARP sweeps
+discovery_timeout = 3.0         # ARP timeout per sweep (seconds)
+
+# ─── Online / Offline presence ───────────────────────────────────────────
+online_check_interval = 10      # seconds between checks for ONLINE devices
+offline_check_interval = 120    # seconds between checks for OFFLINE devices (backoff base)
+ping_timeout = 1.0              # ICMP timeout per device (seconds)
+ping_count = 1                  # ICMP echo requests per check
+max_offline_backoff = 600       # cap backoff at 10 min
+
+# ─── Bandwidth ────────────────────────────────────────────────────────────
+bandwidth_interval = 5          # seconds between bandwidth samples
+use_iptables = true             # per-device accounting via iptables (requires root)
+iptables_chain = "NETPULSE_INPUT"
+
+# ─── Database ─────────────────────────────────────────────────────────────
+db_path = "/var/lib/netpulse/netpulse.db"
+db_retention_days = 90
+
+# ─── Reporting ────────────────────────────────────────────────────────────
+export_dir = "/var/lib/netpulse/exports"
+json_export_interval = 300      # 5 min
+csv_export_interval = 3600      # 1 hr
+
+# ─── Daemon ───────────────────────────────────────────────────────────────
+pid_file = "/var/run/netpulse.pid"
+log_file = "/var/log/netpulse.log"
+log_level = "INFO"              # DEBUG | INFO | WARNING | ERROR
+daemonize = false

@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 200" width="800" height="200" role="img" aria-label="netPulse - silent LAN monitoring, self-hosted, by Skymind Automation">
+  <title>netPulse</title>
+  <defs>
+    <linearGradient id="pulseGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#22d3ee"/>
+      <stop offset="100%" stop-color="#a855f7"/>
+    </linearGradient>
+    <radialGradient id="bgGrad" cx="18%" cy="30%" r="95%">
+      <stop offset="0%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#020617"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="800" height="200" rx="24" fill="url(#bgGrad)"/>
+
+  <!-- icon, left side: network spokes + pulse line through the hub -->
+  <g transform="translate(24,24) scale(0.65)">
+    <g stroke="#334155" stroke-width="2">
+      <line x1="60" y1="60" x2="120" y2="120"/>
+      <line x1="180" y1="60" x2="120" y2="120"/>
+      <line x1="60" y1="180" x2="120" y2="120"/>
+      <line x1="180" y1="180" x2="120" y2="120"/>
+    </g>
+    <g fill="#22d3ee">
+      <circle cx="60" cy="60" r="7"/>
+      <circle cx="180" cy="60" r="7"/>
+      <circle cx="60" cy="180" r="7"/>
+      <circle cx="180" cy="180" r="7"/>
+    </g>
+    <polyline points="30,120 75,120 90,80 105,160 120,60 135,150 150,120 210,120"
+              fill="none" stroke="url(#pulseGrad)" stroke-width="6"
+              stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="120" cy="120" r="10" fill="#f8fafc"/>
+    <circle cx="120" cy="120" r="10" fill="none" stroke="url(#pulseGrad)" stroke-width="3"/>
+  </g>
+
+  <!-- wordmark -->
+  <text x="204" y="105" font-family="'Segoe UI', Helvetica, Arial, sans-serif" font-size="56" font-weight="700" fill="#f8fafc">net<tspan fill="url(#pulseGrad)">Pulse</tspan></text>
+  <text x="206" y="140" font-family="'Segoe UI', Helvetica, Arial, sans-serif" font-size="19" fill="#94a3b8">Silent LAN monitoring, self-hosted</text>
+  <text x="206" y="172" font-family="'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#c084fc">Skymind Automation</text>
+</svg>

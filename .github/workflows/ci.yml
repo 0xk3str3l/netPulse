@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      - run: ruff check netpulse tests
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # Deliberately not `pip install .` / the scapy+psutil+netifaces runtime
+      # deps: tests/ only covers config, db, oui, presence, and export (see
+      # §4.6), none of which touch those modules, so the suite stays fast and
+      # doesn't depend on third-party wheels being available for every Python
+      # version in the matrix.
+      - run: pip install pytest
+
+      - name: Confirm the runner is unprivileged
+        run: |
+          if [ "$(id -u)" -eq 0 ]; then
+            echo "::error::CI must run unprivileged -- tests must pass without root"
+            exit 1
+          fi
+
+      - run: pytest
