@@ -16,7 +16,9 @@ jobs:
       - run: ruff check netpulse tests
 
   test:
-    runs-on: ubuntu-latest
+    # setup-python has no Python 3.9 build for Ubuntu 26.04 (ubuntu-latest);
+    # 3.9.x is available on 24.04, so pin the matrix runner there.
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
