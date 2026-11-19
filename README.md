@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Parrot-R/netPulse/actions/workflows/ci.yml"><img src="https://github.com/Parrot-R/netPulse/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
+  <a href="https://github.com/0xk3str3l/netPulse/actions/workflows/ci.yml"><img src="https://github.com/0xk3str3l/netPulse/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
   <img src="https://img.shields.io/badge/python-3.9%20%7C%203.10%20%7C%203.11%20%7C%203.12-blue" alt="Python 3.9-3.12">
   <img src="https://img.shields.io/badge/license-MIT-informational" alt="MIT License">
   <img src="https://img.shields.io/badge/network%20egress-none-success" alt="No network egress">
@@ -32,9 +32,13 @@ for `NO_COLOR`, `TERM=dumb`, or a non-interactive stream), then drops into the
 live monitor if you asked for one:
 
 ```
-  ▁▂▃▅▇█▇▅▃▂▁   N E T P U L S E   ▁▂▃▅▇█▇▅▃▂▁
-  v1.0.0 · silent LAN monitoring, self-hosted
-  ◆ Skymind Automation
+   N E T P U L S E                                   v1.0.0
+                 █               █               █
+                / \             / \             / \
+               /   \           /   \           /   \
+   ────────────/   \───────────/   \───────────/   \───────
+   every device leaves a trace  ·  self-hosted, no cloud
+   ◆ Skymind Automation
 
 ========================================================================
   netPulse Live Monitor - 2026-08-19 14:02:07
